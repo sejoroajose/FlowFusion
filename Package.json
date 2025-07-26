@@ -25,9 +25,16 @@
     "deploy:local": "yarn workspace @flowfusion/ethereum-contracts deploy:local"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
+    "@nomicfoundation/hardhat-ethers": "^3.1.0",
+    "@nomicfoundation/hardhat-network-helpers": "^1.1.0",
+    "@types/chai": "^5.2.2",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^24.1.0",
     "prettier": "^3.0.0",
-    "typescript": "^5.0.0"
+    "solidity-coverage": "^0.8.16",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
   },
   "keywords": [
     "defi",

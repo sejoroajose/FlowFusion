@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 /**
@@ -287,9 +288,9 @@ library TWAPMath {
      * @param percentage Percentage in basis points
      * @return result Calculated percentage
      */
-    function percentage(uint256 value, uint256 percentage) internal pure returns (uint256) {
+    /* function percentage(uint256 value, uint256 percentage) internal pure returns (uint256) {
         return (value * percentage) / BASIS_POINTS;
-    }
+    } */
     
     /**
      * @notice Linear interpolation between two values

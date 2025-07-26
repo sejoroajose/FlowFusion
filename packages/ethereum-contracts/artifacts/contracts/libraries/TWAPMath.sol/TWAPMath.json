@@ -1,0 +1,10 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "TWAPMath",
+  "sourceName": "contracts/libraries/TWAPMath.sol",
+  "abi": [],
+  "bytecode": "0x60808060405234601757603a9081601d823930815050f35b600080fdfe600080fdfea2646970667358221220f77c0ea1ac5e9c4624bf185df407cea42b5c5ec2ba4db098fba6edb05ceac1b564736f6c63430008180033",
+  "deployedBytecode": "0x600080fdfea2646970667358221220f77c0ea1ac5e9c4624bf185df407cea42b5c5ec2ba4db098fba6edb05ceac1b564736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}
