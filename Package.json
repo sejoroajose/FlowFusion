@@ -1,0 +1,33 @@
+{
+  "name": "flowfusion",
+  "version": "1.0.0",
+  "description": "Multi-Chain TWAP Bridge for Professional Trading",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "install:all": "npm install && npm run install:contracts && npm run install:web",
+    "install:contracts": "cd packages/ethereum-contracts && npm install",
+    "install:web": "cd apps/web-app && npm install",
+    "build": "npm run build:contracts && npm run build:service && npm run build:web",
+    "build:contracts": "cd packages/ethereum-contracts && npx hardhat compile",
+    "build:service": "cd services/bridge-orchestrator && go build -o bin/orchestrator.exe cmd/main.go",
+    "build:web": "cd apps/web-app && npm run build",
+    "test": "npm run test:contracts && npm run test:service",
+    "test:contracts": "cd packages/ethereum-contracts && npx hardhat test",
+    "test:service": "cd services/bridge-orchestrator && go test ./...",
+    "dev:contracts": "cd packages/ethereum-contracts && npx hardhat node",
+    "dev:service": "cd services/bridge-orchestrator && go run cmd/main.go",
+    "dev:web": "cd apps/web-app && npm start",
+    "deploy:local": "cd packages/ethereum-contracts && npx hardhat deploy --network localhost"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "prettier": "^3.0.0"
+  },
+  "keywords": ["defi", "twap", "cross-chain", "ethereum", "cosmos"],
+  "license": "MIT"
+}
