@@ -302,13 +302,7 @@ func CompressionMiddleware() gin.HandlerFunc {
 	}
 }
 
-// Helper functions
 
-// generateRequestID creates a unique request ID
-func generateRequestID() string {
-	// Simple implementation - use a proper UUID library in production
-	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Nanosecond()%1000000)
-}
 
 // isHealthCheckPath checks if the path is a health check endpoint
 func isHealthCheckPath(path string) bool {
@@ -364,7 +358,7 @@ const (
 	DefaultRateLimit     = 100
 	DefaultRateWindow    = time.Minute
 	DefaultRequestTimeout = 30 * time.Second
-	MaxRequestSize       = 10 << 20 // 10MB
+	MaxRequestSize       = 10 << 20 
 )
 
 // Production middleware configurations

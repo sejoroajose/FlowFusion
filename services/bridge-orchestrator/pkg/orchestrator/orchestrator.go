@@ -1,714 +1,519 @@
-package api
+package orchestrator
 
 import (
-	"net/http"
-	"strconv"
+	"context"
+	"fmt"
+	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 
+	"flowfusion/bridge-orchestrator/internal/config"
 	"flowfusion/bridge-orchestrator/internal/database"
-	"flowfusion/bridge-orchestrator/pkg/orchestrator"
+	"flowfusion/bridge-orchestrator/pkg/adapters"
 	"flowfusion/bridge-orchestrator/pkg/twap"
 )
 
-// Handler holds dependencies for API handlers
-type Handler struct {
-	orchestrator *orchestrator.Orchestrator
-	twapEngine   *twap.Engine
-	db           database.DB
-	logger       *zap.Logger
+// Orchestrator coordinates cross-chain operations and TWAP execution
+type Orchestrator struct {
+	config         *config.Config
+	db             database.DB
+	adapterManager *adapters.Manager
+	twapEngine     *twap.Engine
+	logger         *zap.Logger
+
+	// Internal state
+	eventHandlers map[string]EventHandler
+	stopChan      chan struct{}
+	wg            sync.WaitGroup
+	mutex         sync.RWMutex
+
+	// Statistics
+	stats *Statistics
 }
 
-// SetupRoutes configures all API routes
-func SetupRoutes(
-	router *gin.Engine,
-	orch *orchestrator.Orchestrator,
-	twapEngine *twap.Engine,
+// EventHandler handles blockchain events
+type EventHandler func(event *adapters.ChainEvent) error
+
+// Statistics tracks orchestrator performance
+type Statistics struct {
+	TotalOrders        int64     `json:"total_orders"`
+	ActiveOrders       int64     `json:"active_orders"`
+	CompletedOrders    int64     `json:"completed_orders"`
+	FailedOrders       int64     `json:"failed_orders"`
+	TotalVolume        string    `json:"total_volume"`
+	CrossChainSwaps    int64     `json:"cross_chain_swaps"`
+	SuccessfulSwaps    int64     `json:"successful_swaps"`
+	AverageProcessTime string    `json:"average_process_time"`
+	LastProcessedOrder time.Time `json:"last_processed_order"`
+	UptimeSeconds      int64     `json:"uptime_seconds"`
+	startTime          time.Time
+	mutex              sync.RWMutex
+}
+
+// New creates a new orchestrator
+func New(
+	config *config.Config,
 	db database.DB,
+	adapterManager *adapters.Manager,
+	twapEngine *twap.Engine,
 	logger *zap.Logger,
-) {
-	h := &Handler{
-		orchestrator: orch,
-		twapEngine:   twapEngine,
-		db:           db,
-		logger:       logger,
-	}
-
-	// Health check
-	router.GET("/health", h.healthCheck)
-	router.GET("/ready", h.readinessCheck)
-
-	// API v1 routes
-	v1 := router.Group("/api/v1")
-	{
-		// Order management
-		orders := v1.Group("/orders")
-		{
-			orders.POST("", h.createOrder)
-			orders.GET("/:id", h.getOrder)
-			orders.PUT("/:id/cancel", h.cancelOrder)
-			orders.GET("", h.listOrders)
-			orders.GET("/:id/history", h.getOrderHistory)
-			orders.GET("/:id/status", h.getOrderStatus)
-		}
-
-		// TWAP operations
-		twapRoutes := v1.Group("/twap")
-		{
-			twapRoutes.GET("/price/:pair", h.getTWAPPrice)
-			twapRoutes.GET("/current/:pair", h.getCurrentPrice)
-			twapRoutes.POST("/execute/:id", h.executeOrder)
-			twapRoutes.GET("/metrics", h.getTWAPMetrics)
-		}
-
-		// Chain operations
-		chains := v1.Group("/chains")
-		{
-			chains.GET("", h.getSupportedChains)
-			chains.GET("/:id/status", h.getChainStatus)
-			chains.GET("/:id/metrics", h.getChainMetrics)
-		}
-
-		// Price feeds
-		prices := v1.Group("/prices")
-		{
-			prices.GET("/:pair/history", h.getPriceHistory)
-			prices.GET("/:pair/latest", h.getLatestPrice)
-		}
-
-		// Statistics and analytics
-		stats := v1.Group("/stats")
-		{
-			stats.GET("/overview", h.getOverviewStats)
-			stats.GET("/volume", h.getVolumeStats)
-			stats.GET("/performance", h.getPerformanceStats)
-		}
-
-		// WebSocket endpoint for real-time updates
-		v1.GET("/ws", h.websocketHandler)
-	}
-}
-
-// Health check endpoints
-func (h *Handler) healthCheck(c *gin.Context) {
-	// Check database connectivity
-	if err := h.db.Health(); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"status": "unhealthy",
-			"error":  "database connection failed",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"timestamp": time.Now().UTC(),
-		"version":   "1.0.0",
-		"service":   "flowfusion-bridge-orchestrator",
-	})
-}
-
-func (h *Handler) readinessCheck(c *gin.Context) {
-	// More comprehensive readiness check
-	checks := map[string]string{
-		"database": "healthy",
-		"twap_engine": "healthy",
-		"orchestrator": "healthy",
-	}
-
-	// Check database
-	if err := h.db.Health(); err != nil {
-		checks["database"] = "unhealthy"
-	}
-
-	// Check if any critical component is unhealthy
-	allHealthy := true
-	for _, status := range checks {
-		if status != "healthy" {
-			allHealthy = false
-			break
-		}
-	}
-
-	statusCode := http.StatusOK
-	if !allHealthy {
-		statusCode = http.StatusServiceUnavailable
-	}
-
-	c.JSON(statusCode, gin.H{
-		"ready":     allHealthy,
-		"checks":    checks,
-		"timestamp": time.Now().UTC(),
-	})
-}
-
-// Order management endpoints
-func (h *Handler) createOrder(c *gin.Context) {
-	var req CreateOrderRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.logger.Error("Invalid create order request", zap.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid request format",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	// Validate request
-	if err := req.Validate(); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Validation failed",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	// Convert to database order
-	order := &database.Order{
-		ID:                  req.ID,
-		UserAddress:         req.UserAddress,
-		SourceChain:         req.SourceChain,
-		TargetChain:         req.TargetChain,
-		SourceToken:         req.SourceToken,
-		SourceAmount:        req.SourceAmount,
-		TargetToken:         req.TargetToken,
-		TargetRecipient:     req.TargetRecipient,
-		MinReceived:         req.MinReceived,
-		WindowMinutes:       req.TWAPConfig.WindowMinutes,
-		ExecutionIntervals:  req.TWAPConfig.ExecutionIntervals,
-		MaxSlippage:         req.TWAPConfig.MaxSlippage,
-		MinFillSize:         req.TWAPConfig.MinFillSize,
-		EnableMEVProtection: req.TWAPConfig.EnableMEVProtection,
-		HTLCHash:            req.HTLCHash,
-		TimeoutHeight:       req.TimeoutHeight,
-		TimeoutTimestamp:    req.TimeoutTimestamp,
-		Status:              string(database.OrderStatusPending),
-		ExecutedAmount:      decimal.Zero,
-		AveragePrice:        decimal.Zero,
-		Metadata:            database.Metadata(req.Metadata),
-	}
-
-	// Create order in database
-	if err := h.db.CreateOrder(order); err != nil {
-		h.logger.Error("Failed to create order", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to create order",
-		})
-		return
-	}
-
-	h.logger.Info("Order created successfully", zap.String("order_id", order.ID))
-
-	c.JSON(http.StatusCreated, gin.H{
-		"order_id": order.ID,
-		"status":   order.Status,
-		"created_at": time.Now().UTC(),
-	})
-}
-
-func (h *Handler) getOrder(c *gin.Context) {
-	orderID := c.Param("id")
-	if orderID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Order ID is required",
-		})
-		return
-	}
-
-	order, err := h.db.GetOrder(orderID)
-	if err != nil {
-		if err == database.ErrOrderNotFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Order not found",
-			})
-			return
-		}
-		h.logger.Error("Failed to get order", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve order",
-		})
-		return
-	}
-
-	// Get execution history
-	history, err := h.db.GetExecutionHistory(orderID)
-	if err != nil {
-		h.logger.Error("Failed to get execution history", zap.Error(err))
-		history = []*database.ExecutionRecord{} // Return empty history on error
-	}
-
-	response := OrderResponse{
-		ID:                  order.ID,
-		UserAddress:         order.UserAddress,
-		SourceChain:         order.SourceChain,
-		TargetChain:         order.TargetChain,
-		SourceToken:         order.SourceToken,
-		SourceAmount:        order.SourceAmount,
-		TargetToken:         order.TargetToken,
-		TargetRecipient:     order.TargetRecipient,
-		MinReceived:         order.MinReceived,
-		TWAPConfig: TWAPConfigResponse{
-			WindowMinutes:       order.WindowMinutes,
-			ExecutionIntervals:  order.ExecutionIntervals,
-			MaxSlippage:         order.MaxSlippage,
-			MinFillSize:         order.MinFillSize,
-			EnableMEVProtection: order.EnableMEVProtection,
+) (*Orchestrator, error) {
+	orchestrator := &Orchestrator{
+		config:         config,
+		db:             db,
+		adapterManager: adapterManager,
+		twapEngine:     twapEngine,
+		logger:         logger,
+		eventHandlers:  make(map[string]EventHandler),
+		stopChan:       make(chan struct{}),
+		stats: &Statistics{
+			startTime: time.Now(),
 		},
-		HTLCHash:         order.HTLCHash,
-		TimeoutHeight:    order.TimeoutHeight,
-		TimeoutTimestamp: order.TimeoutTimestamp,
-		CreatedAt:        order.CreatedAt,
-		UpdatedAt:        order.UpdatedAt,
-		ExecutedAmount:   order.ExecutedAmount,
-		LastExecution:    order.LastExecution,
-		Status:           order.Status,
-		AveragePrice:     order.AveragePrice,
-		CompletionRate:   order.CalculateCompletionRate(),
-		ExecutionHistory: convertExecutionHistory(history),
-		Metadata:         map[string]interface{}(order.Metadata),
 	}
 
-	c.JSON(http.StatusOK, response)
+	// Setup default event handlers
+	orchestrator.setupEventHandlers()
+
+	return orchestrator, nil
 }
 
-func (h *Handler) cancelOrder(c *gin.Context) {
-	orderID := c.Param("id")
-	userAddress := c.GetHeader("X-User-Address") // In production, extract from JWT
+// Start starts the orchestrator
+func (o *Orchestrator) Start(ctx context.Context) error {
+	o.logger.Info("Starting bridge orchestrator")
 
-	if orderID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Order ID is required",
-		})
-		return
+	// Connect all adapters
+	if err := o.adapterManager.ConnectAll(); err != nil {
+		o.logger.Error("Failed to connect adapters", zap.Error(err))
+		return fmt.Errorf("failed to connect adapters: %w", err)
 	}
 
-	order, err := h.db.GetOrder(orderID)
-	if err != nil {
-		if err == database.ErrOrderNotFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Order not found",
-			})
-			return
+	// Subscribe to blockchain events
+	o.wg.Add(1)
+	go o.eventSubscriber(ctx)
+
+	// Start order monitor
+	o.wg.Add(1)
+	go o.orderMonitor(ctx)
+
+	// Start statistics updater
+	o.wg.Add(1)
+	go o.statisticsUpdater(ctx)
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	o.logger.Info("Stopping bridge orchestrator")
+	close(o.stopChan)
+	o.wg.Wait()
+
+	// Disconnect all adapters
+	if err := o.adapterManager.DisconnectAll(); err != nil {
+		o.logger.Error("Failed to disconnect adapters", zap.Error(err))
+	}
+
+	return nil
+}
+
+// setupEventHandlers configures default event handlers
+func (o *Orchestrator) setupEventHandlers() {
+	o.eventHandlers[adapters.EventOrderCreated] = o.handleOrderCreated
+	o.eventHandlers[adapters.EventOrderExecuted] = o.handleOrderExecuted
+	o.eventHandlers[adapters.EventOrderCompleted] = o.handleOrderCompleted
+	o.eventHandlers[adapters.EventHTLCCreated] = o.handleHTLCCreated
+	o.eventHandlers[adapters.EventHTLCClaimed] = o.handleHTLCClaimed
+	o.eventHandlers[adapters.EventPriceUpdate] = o.handlePriceUpdate
+}
+
+// eventSubscriber subscribes to events from all chains
+func (o *Orchestrator) eventSubscriber(ctx context.Context) {
+	defer o.wg.Done()
+
+	o.logger.Info("Starting event subscriber")
+
+	// Subscribe to events from all adapters
+	chainAdapters := o.adapterManager.GetAllAdapters() 
+	for chainID, adapter := range chainAdapters {
+		go func(chainID string, adapter adapters.ChainAdapter) { 
+			if err := adapter.SubscribeToEvents(o.handleEvent); err != nil {
+				o.logger.Error("Failed to subscribe to events",
+					zap.String("chain_id", chainID),
+					zap.Error(err))
+			}
+		}(chainID, adapter)
+	}
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	// Unsubscribe from all events
+	for chainID, adapter := range chainAdapters {
+		if err := adapter.UnsubscribeFromEvents(); err != nil {
+			o.logger.Error("Failed to unsubscribe from events",
+				zap.String("chain_id", chainID),
+				zap.Error(err))
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve order",
-		})
-		return
+	}
+}
+
+// orderMonitor monitors order statuses and handles timeouts
+func (o *Orchestrator) orderMonitor(ctx context.Context) {
+	defer o.wg.Done()
+
+	o.logger.Info("Starting order monitor")
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-o.stopChan:
+			return
+		case <-ticker.C:
+			if err := o.checkOrderTimeouts(); err != nil {
+				o.logger.Error("Failed to check order timeouts", zap.Error(err))
+			}
+		}
+	}
+}
+
+// statisticsUpdater updates orchestrator statistics
+func (o *Orchestrator) statisticsUpdater(ctx context.Context) {
+	defer o.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-o.stopChan:
+			return
+		case <-ticker.C:
+			o.updateStatistics()
+		}
+	}
+}
+
+// handleEvent routes events to appropriate handlers
+func (o *Orchestrator) handleEvent(event *adapters.ChainEvent) error {
+	o.logger.Debug("Received blockchain event",
+		zap.String("chain_id", event.ChainID),
+		zap.String("event_type", event.EventType),
+		zap.String("tx_hash", event.TxHash))
+
+	handler, exists := o.eventHandlers[event.EventType]
+	if !exists {
+		o.logger.Debug("No handler for event type",
+			zap.String("event_type", event.EventType))
+		return nil
 	}
 
-	// Verify ownership (in production, use proper authentication)
-	if userAddress != "" && order.UserAddress != userAddress {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Unauthorized to cancel this order",
-		})
-		return
+	if err := handler(event); err != nil {
+		o.logger.Error("Event handler failed",
+			zap.String("event_type", event.EventType),
+			zap.String("chain_id", event.ChainID),
+			zap.Error(err))
+		return err
 	}
 
-	// Check if order can be cancelled
-	if order.Status == string(database.OrderStatusCompleted) ||
-		order.Status == string(database.OrderStatusCancelled) ||
-		order.Status == string(database.OrderStatusClaimed) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Order cannot be cancelled in current status",
-			"status": order.Status,
-		})
-		return
+	return nil
+}
+
+// Event handlers
+func (o *Orchestrator) handleOrderCreated(event *adapters.ChainEvent) error {
+	o.logger.Info("Order created event received",
+		zap.String("chain_id", event.ChainID),
+		zap.String("tx_hash", event.TxHash))
+
+	// Update statistics
+	o.stats.mutex.Lock()
+	o.stats.TotalOrders++
+	o.stats.ActiveOrders++
+	o.stats.mutex.Unlock()
+
+	return nil
+}
+
+func (o *Orchestrator) handleOrderExecuted(event *adapters.ChainEvent) error {
+	o.logger.Info("Order executed event received",
+		zap.String("chain_id", event.ChainID),
+		zap.String("tx_hash", event.TxHash))
+
+	// Extract order ID from event data
+	orderID, ok := event.Data["order_id"].(string)
+	if !ok {
+		return fmt.Errorf("missing order_id in event data")
 	}
 
-	// Update order status
-	order.Status = string(database.OrderStatusCancelled)
+	// Update order in database
+	order, err := o.db.GetOrder(orderID)
+	if err != nil {
+		return fmt.Errorf("failed to get order: %w", err)
+	}
+
+	// Update order status based on event
+	order.Status = string(database.OrderStatusExecuting)
 	order.UpdatedAt = time.Now()
 
-	if err := h.db.UpdateOrder(order); err != nil {
-		h.logger.Error("Failed to cancel order", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to cancel order",
-		})
-		return
+	if err := o.db.UpdateOrder(order); err != nil {
+		return fmt.Errorf("failed to update order: %w", err)
 	}
 
-	h.logger.Info("Order cancelled", zap.String("order_id", orderID))
-
-	c.JSON(http.StatusOK, gin.H{
-		"order_id": orderID,
-		"status":   order.Status,
-		"cancelled_at": time.Now().UTC(),
-	})
+	return nil
 }
 
-func (h *Handler) listOrders(c *gin.Context) {
-	// Parse query parameters
-	userAddress := c.Query("user")
-	sourceChain := c.Query("source_chain")
-	targetChain := c.Query("target_chain")
-	status := c.Query("status")
-	limitStr := c.DefaultQuery("limit", "20")
-	offsetStr := c.DefaultQuery("offset", "0")
+func (o *Orchestrator) handleOrderCompleted(event *adapters.ChainEvent) error {
+	o.logger.Info("Order completed event received",
+		zap.String("chain_id", event.ChainID),
+		zap.String("tx_hash", event.TxHash))
 
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 || limit > 100 {
-		limit = 20
+	// Update statistics
+	o.stats.mutex.Lock()
+	o.stats.CompletedOrders++
+	o.stats.ActiveOrders--
+	o.stats.LastProcessedOrder = time.Now()
+	o.stats.mutex.Unlock()
+
+	return nil
+}
+
+func (o *Orchestrator) handleHTLCCreated(event *adapters.ChainEvent) error {
+	o.logger.Info("HTLC created event received",
+		zap.String("chain_id", event.ChainID),
+		zap.String("tx_hash", event.TxHash))
+
+	// Extract HTLC data from event
+	htlcAddress, ok := event.Data["htlc_address"].(string)
+	if !ok {
+		return fmt.Errorf("missing htlc_address in event data")
 	}
 
-	offset, err := strconv.Atoi(offsetStr)
-	if err != nil || offset < 0 {
-		offset = 0
-	}
-
-	// For simplicity, only implement user filtering for now
-	if userAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "User address is required",
-		})
-		return
-	}
-
-	orders, err := h.db.GetOrdersByUser(userAddress, limit, offset)
+	// Get HTLC details from the chain
+	adapter, err := o.adapterManager.GetAdapter(event.ChainID)
 	if err != nil {
-		h.logger.Error("Failed to get orders", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve orders",
-		})
-		return
+		return fmt.Errorf("failed to get adapter: %w", err)
 	}
 
-	// Convert to response format
-	var orderResponses []OrderSummaryResponse
+	htlcStatus, err := adapter.GetHTLCStatus(htlcAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get HTLC status: %w", err)
+	}
+
+	// Store HTLC in database
+	htlc := &database.HTLC{
+		Address:          htlcStatus.Address,
+		OrderID:          fmt.Sprintf("order_%s", htlcStatus.HashedSecret[:8]),
+		HashedSecret:     htlcStatus.HashedSecret,
+		Amount:           htlcStatus.Amount,
+		Token:            htlcStatus.TokenAddress,
+		Sender:           htlcStatus.Sender,
+		Receiver:         htlcStatus.Recipient,
+		TimeoutHeight:    htlcStatus.TimeoutHeight,
+		TimeoutTimestamp: htlcStatus.TimeoutTimestamp,
+		Status:           htlcStatus.Status,
+		CreatedAt:        htlcStatus.CreatedAt,
+		ChainID:          event.ChainID,
+	}
+
+	if err := o.db.CreateHTLC(htlc); err != nil {
+		o.logger.Error("Failed to store HTLC in database", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+func (o *Orchestrator) handleHTLCClaimed(event *adapters.ChainEvent) error {
+	o.logger.Info("HTLC claimed event received",
+		zap.String("chain_id", event.ChainID),
+		zap.String("tx_hash", event.TxHash))
+
+	// Update statistics
+	o.stats.mutex.Lock()
+	o.stats.SuccessfulSwaps++
+	o.stats.mutex.Unlock()
+
+	return nil
+}
+
+func (o *Orchestrator) handlePriceUpdate(event *adapters.ChainEvent) error {
+	o.logger.Debug("Price update event received",
+		zap.String("chain_id", event.ChainID))
+
+	// Price updates are handled by the TWAP engine
+	return nil
+}
+
+// checkOrderTimeouts checks for expired orders and handles them
+func (o *Orchestrator) checkOrderTimeouts() error {
+	orders, err := o.db.GetExecutableOrders()
+	if err != nil {
+		return fmt.Errorf("failed to get orders: %w", err)
+	}
+
+	currentTime := time.Now().Unix()
+	
 	for _, order := range orders {
-		// Get execution count
-		history, _ := h.db.GetExecutionHistory(order.ID)
-		
-		orderResponses = append(orderResponses, OrderSummaryResponse{
-			ID:                order.ID,
-			SourceChain:       order.SourceChain,
-			TargetChain:       order.TargetChain,
-			SourceAmount:      order.SourceAmount,
-			ExecutedAmount:    order.ExecutedAmount,
-			Status:            order.Status,
-			CreatedAt:         order.CreatedAt,
-			CompletionRate:    order.CalculateCompletionRate(),
-			AveragePrice:      order.AveragePrice,
-			IntervalsExecuted: len(history),
-			TotalIntervals:    order.ExecutionIntervals,
-		})
-	}
+		// Check if order has timed out
+		if currentTime >= order.TimeoutTimestamp {
+			o.logger.Info("Order timed out",
+				zap.String("order_id", order.ID),
+				zap.Int64("timeout_timestamp", order.TimeoutTimestamp))
 
-	c.JSON(http.StatusOK, gin.H{
-		"orders": orderResponses,
-		"pagination": gin.H{
-			"limit":  limit,
-			"offset": offset,
-			"count":  len(orderResponses),
-		},
-	})
-}
+			// Update order status to expired
+			order.Status = string(database.OrderStatusExpired)
+			order.UpdatedAt = time.Now()
 
-func (h *Handler) getOrderHistory(c *gin.Context) {
-	orderID := c.Param("id")
-	
-	history, err := h.db.GetExecutionHistory(orderID)
-	if err != nil {
-		h.logger.Error("Failed to get execution history", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve execution history",
-		})
-		return
-	}
+			if err := o.db.UpdateOrder(order); err != nil {
+				o.logger.Error("Failed to update expired order",
+					zap.String("order_id", order.ID),
+					zap.Error(err))
+			}
 
-	c.JSON(http.StatusOK, gin.H{
-		"order_id": orderID,
-		"history":  convertExecutionHistory(history),
-	})
-}
-
-func (h *Handler) getOrderStatus(c *gin.Context) {
-	orderID := c.Param("id")
-	
-	order, err := h.db.GetOrder(orderID)
-	if err != nil {
-		if err == database.ErrOrderNotFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Order not found",
-			})
-			return
+			// Update statistics
+			o.stats.mutex.Lock()
+			o.stats.FailedOrders++
+			o.stats.ActiveOrders--
+			o.stats.mutex.Unlock()
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve order",
-		})
-		return
 	}
 
-	// Calculate progress
-	history, _ := h.db.GetExecutionHistory(orderID)
-	
-	c.JSON(http.StatusOK, gin.H{
-		"order_id":          orderID,
-		"status":            order.Status,
-		"completion_rate":   order.CalculateCompletionRate(),
-		"executed_amount":   order.ExecutedAmount,
-		"remaining_amount":  order.GetRemainingAmount(),
-		"intervals_executed": len(history),
-		"total_intervals":   order.ExecutionIntervals,
-		"average_price":     order.AveragePrice,
-		"last_execution":    order.LastExecution,
-		"can_execute":       order.CanExecuteInterval(),
-		"next_execution":    order.GetNextExecutionTime(),
-	})
+	return nil
 }
 
-// TWAP endpoints
-func (h *Handler) getTWAPPrice(c *gin.Context) {
-	pair := c.Param("pair")
-	windowStr := c.DefaultQuery("window", "60")
+// updateStatistics updates orchestrator statistics
+func (o *Orchestrator) updateStatistics() {
+	o.stats.mutex.Lock()
+	defer o.stats.mutex.Unlock()
 
-	window, err := strconv.Atoi(windowStr)
-	if err != nil || window < 5 || window > 1440 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid window parameter (must be 5-1440 minutes)",
-		})
-		return
-	}
+	o.stats.UptimeSeconds = int64(time.Since(o.stats.startTime).Seconds())
 
-	price, err := h.twapEngine.GetTWAPPrice(pair, window)
-	if err != nil {
-		h.logger.Error("Failed to get TWAP price", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to calculate TWAP price",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token_pair":     pair,
-		"window_minutes": window,
-		"twap_price":     price,
-		"calculated_at":  time.Now().UTC(),
-	})
+	// Log current statistics
+	o.logger.Debug("Statistics update",
+		zap.Int64("total_orders", o.stats.TotalOrders),
+		zap.Int64("active_orders", o.stats.ActiveOrders),
+		zap.Int64("completed_orders", o.stats.CompletedOrders),
+		zap.Int64("uptime_seconds", o.stats.UptimeSeconds))
 }
 
-func (h *Handler) getCurrentPrice(c *gin.Context) {
-	pair := c.Param("pair")
+// Public API methods
 
-	price, err := h.twapEngine.GetCurrentPrice(pair)
-	if err != nil {
-		h.logger.Error("Failed to get current price", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to get current price",
-		})
-		return
+// GetStatistics returns current orchestrator statistics
+func (o *Orchestrator) GetStatistics() *Statistics {
+	o.stats.mutex.RLock()
+	defer o.stats.mutex.RUnlock()
+
+	// Return a copy to avoid race conditions
+	return &Statistics{
+		TotalOrders:        o.stats.TotalOrders,
+		ActiveOrders:       o.stats.ActiveOrders,
+		CompletedOrders:    o.stats.CompletedOrders,
+		FailedOrders:       o.stats.FailedOrders,
+		TotalVolume:        o.stats.TotalVolume,
+		CrossChainSwaps:    o.stats.CrossChainSwaps,
+		SuccessfulSwaps:    o.stats.SuccessfulSwaps,
+		AverageProcessTime: o.stats.AverageProcessTime,
+		LastProcessedOrder: o.stats.LastProcessedOrder,
+		UptimeSeconds:      o.stats.UptimeSeconds,
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token_pair":  pair,
-		"price":       price,
-		"timestamp":   time.Now().UTC(),
-	})
 }
 
-func (h *Handler) executeOrder(c *gin.Context) {
-	orderID := c.Param("id")
+// GetAdapterManager returns the adapter manager
+func (o *Orchestrator) GetAdapterManager() *adapters.Manager {
+	return o.adapterManager
+}
 
-	response, err := h.twapEngine.ExecuteOrderManually(orderID)
+// GetTWAPEngine returns the TWAP engine
+func (o *Orchestrator) GetTWAPEngine() *twap.Engine {
+	return o.twapEngine
+}
+
+// HealthCheck performs a comprehensive health check
+func (o *Orchestrator) HealthCheck() map[string]interface{} {
+	health := make(map[string]interface{})
+
+	// Check database health
+	if err := o.db.Health(); err != nil {
+		health["database"] = map[string]interface{}{
+			"status": "unhealthy",
+			"error":  err.Error(),
+		}
+	} else {
+		health["database"] = map[string]interface{}{
+			"status": "healthy",
+		}
+	}
+
+	// Check adapter health
+	adapterHealth := o.adapterManager.HealthCheckAll()
+	adapters := make(map[string]interface{})
+	for chainID, err := range adapterHealth {
+		if err != nil {
+			adapters[chainID] = map[string]interface{}{
+				"status": "unhealthy",
+				"error":  err.Error(),
+			}
+		} else {
+			adapters[chainID] = map[string]interface{}{
+				"status": "healthy",
+			}
+		}
+	}
+	health["adapters"] = adapters
+
+	// Add statistics
+	health["statistics"] = o.GetStatistics()
+
+	// Add uptime
+	health["uptime"] = time.Since(o.stats.startTime).String()
+
+	return health
+}
+
+// ProcessOrder manually processes a specific order (for testing/debugging)
+func (o *Orchestrator) ProcessOrder(orderID string) error {
+	order, err := o.db.GetOrder(orderID)
 	if err != nil {
-		h.logger.Error("Failed to execute order", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-		return
+		return fmt.Errorf("failed to get order: %w", err)
+	}
+
+	o.logger.Info("Manually processing order",
+		zap.String("order_id", orderID),
+		zap.String("status", order.Status))
+
+	// Trigger TWAP execution
+	response, err := o.twapEngine.ExecuteOrderManually(orderID)
+	if err != nil {
+		return fmt.Errorf("failed to execute order: %w", err)
 	}
 
 	if !response.Success {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": response.Error.Error(),
-		})
-		return
+		return fmt.Errorf("order execution failed: %s", response.Error.Error())
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":         true,
-		"executed_amount": response.ExecutedAmount,
-		"execution_price": response.ExecutionPrice,
-		"tx_hash":         response.TxHash,
-		"gas_used":        response.GasUsed,
-		"slippage_bps":    response.Slippage,
-	})
+	o.logger.Info("Order processed successfully",
+		zap.String("order_id", orderID),
+		zap.String("tx_hash", response.TxHash))
+
+	return nil
 }
 
-func (h *Handler) getTWAPMetrics(c *gin.Context) {
-	metrics := h.twapEngine.GetMetrics()
+// AddEventHandler adds a custom event handler
+func (o *Orchestrator) AddEventHandler(eventType string, handler EventHandler) {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
 
-	c.JSON(http.StatusOK, gin.H{
-		"total_executions":      metrics.TotalExecutions,
-		"successful_executions": metrics.SuccessfulExecutions,
-		"failed_executions":     metrics.FailedExecutions,
-		"success_rate":          float64(metrics.SuccessfulExecutions) / float64(metrics.TotalExecutions) * 100,
-		"average_execution_time": metrics.AverageExecutionTime.String(),
-		"average_slippage":      metrics.AverageSlippage,
-		"total_volume_executed": metrics.TotalVolumeExecuted,
-		"last_execution_time":   metrics.LastExecutionTime,
-	})
+	o.eventHandlers[eventType] = handler
 }
 
-// Chain endpoints
-func (h *Handler) getSupportedChains(c *gin.Context) {
-	chains, err := h.db.GetSupportedChains()
-	if err != nil {
-		h.logger.Error("Failed to get supported chains", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve supported chains",
-		})
-		return
-	}
+// RemoveEventHandler removes an event handler
+func (o *Orchestrator) RemoveEventHandler(eventType string) {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
 
-	c.JSON(http.StatusOK, gin.H{
-		"supported_chains": chains,
-		"count":           len(chains),
-	})
-}
-
-func (h *Handler) getChainStatus(c *gin.Context) {
-	chainID := c.Param("id")
-
-	status, err := h.db.GetChainStatus(chainID)
-	if err != nil {
-		if err == database.ErrChainNotFound {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Chain not found",
-			})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve chain status",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, status)
-}
-
-func (h *Handler) getChainMetrics(c *gin.Context) {
-	chainID := c.Param("id")
-
-	// Mock metrics for now
-	c.JSON(http.StatusOK, gin.H{
-		"chain_id":           chainID,
-		"order_count":        100,
-		"total_volume":       "1000000",
-		"success_rate":       99.5,
-		"average_block_time": "12s",
-		"health_status":      "healthy",
-	})
-}
-
-// WebSocket handler for real-time updates
-func (h *Handler) websocketHandler(c *gin.Context) {
-	// WebSocket implementation would go here
-	// For now, return a simple message
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"message": "WebSocket endpoint not yet implemented",
-	})
-}
-
-// Statistics endpoints
-func (h *Handler) getOverviewStats(c *gin.Context) {
-	// Mock implementation
-	c.JSON(http.StatusOK, gin.H{
-		"total_orders":     500,
-		"active_orders":    25,
-		"completed_orders": 450,
-		"total_volume":     "50000000",
-		"success_rate":     99.2,
-		"avg_execution_time": "45s",
-	})
-}
-
-func (h *Handler) getVolumeStats(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"daily_volume":   "1000000",
-		"weekly_volume":  "7000000",
-		"monthly_volume": "30000000",
-		"volume_by_chain": gin.H{
-			"ethereum": "20000000",
-			"cosmos":   "8000000",
-			"stellar":  "2000000",
-		},
-	})
-}
-
-func (h *Handler) getPerformanceStats(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"average_slippage":      "0.15%",
-		"average_execution_time": "42s",
-		"success_rate":          99.2,
-		"mev_protection_rate":   100.0,
-	})
-}
-
-func (h *Handler) getPriceHistory(c *gin.Context) {
-	pair := c.Param("pair")
-	windowStr := c.DefaultQuery("window", "1440") // 24 hours default
-
-	window, err := strconv.Atoi(windowStr)
-	if err != nil {
-		window = 1440
-	}
-
-	history, err := h.db.GetPriceHistory(pair, window)
-	if err != nil {
-		h.logger.Error("Failed to get price history", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to retrieve price history",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token_pair": pair,
-		"window_minutes": window,
-		"data_points": len(history),
-		"history": history,
-	})
-}
-
-func (h *Handler) getLatestPrice(c *gin.Context) {
-	pair := c.Param("pair")
-
-	// Get most recent price point
-	history, err := h.db.GetPriceHistory(pair, 60) // Last hour
-	if err != nil || len(history) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "No price data available",
-		})
-		return
-	}
-
-	latest := history[len(history)-1]
-	c.JSON(http.StatusOK, gin.H{
-		"token_pair": pair,
-		"price":      latest.Price,
-		"volume":     latest.Volume,
-		"source":     latest.Source,
-		"timestamp":  latest.Timestamp,
-	})
-}
-
-// Helper functions
-func convertExecutionHistory(history []*database.ExecutionRecord) []ExecutionHistoryResponse {
-	var response []ExecutionHistoryResponse
-	for _, record := range history {
-		response = append(response, ExecutionHistoryResponse{
-			IntervalNumber: record.IntervalNumber,
-			Timestamp:      record.Timestamp,
-			Amount:         record.Amount,
-			Price:          record.Price,
-			GasUsed:        record.GasUsed,
-			Slippage:       record.Slippage,
-			TxHash:         record.TxHash,
-			ChainID:        record.ChainID,
-		})
-	}
-	return response
+	delete(o.eventHandlers, eventType)
 }

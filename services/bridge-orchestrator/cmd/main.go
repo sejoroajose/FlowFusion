@@ -18,8 +18,8 @@ import (
 	"flowfusion/bridge-orchestrator/internal/config"
 	"flowfusion/bridge-orchestrator/internal/database"
 	"flowfusion/bridge-orchestrator/pkg/adapters"
-	"flowfusion/bridge-orchestrator/pkg/orchestrator"
 	"flowfusion/bridge-orchestrator/pkg/twap"
+	"flowfusion/bridge-orchestrator/pkg/orchestrator"
 )
 
 func main() {
@@ -73,7 +73,7 @@ func main() {
 		zap.Int("adapter_count", adapterManager.GetAdapterCount()))
 
 	// Initialize TWAP engine
-	twapEngine, err := twap.NewEngine(cfg.TWAPConfig, db, adapterManager, logger)
+	twapEngine, err := twap.NewEngine(config.Config{}, db, adapterManager, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize TWAP engine", zap.Error(err))
 	}

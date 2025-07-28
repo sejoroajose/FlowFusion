@@ -16,7 +16,7 @@ import (
 
 // Engine handles TWAP calculations and execution logic
 type Engine struct {
-	config         config.TWAPConfig
+	config         config.Config
 	db             database.DB
 	adapterManager *adapters.Manager
 	logger         *zap.Logger
@@ -82,7 +82,7 @@ type Metrics struct {
 
 // NewEngine creates a new TWAP engine
 func NewEngine(
-	config config.TWAPConfig,
+	config config.Config,
 	db database.DB,
 	adapterManager *adapters.Manager,
 	logger *zap.Logger,
@@ -138,7 +138,7 @@ func (e *Engine) Start(ctx context.Context) error {
 func (e *Engine) priceFeedUpdater(ctx context.Context) {
 	defer e.wg.Done()
 	
-	ticker := time.NewTicker(e.config.PriceUpdateInterval)
+	ticker := time.NewTicker(e.config.TWAPConfig.UpdateInterval)
 	defer ticker.Stop()
 
 	for {
@@ -159,7 +159,7 @@ func (e *Engine) priceFeedUpdater(ctx context.Context) {
 func (e *Engine) orderProcessor(ctx context.Context) {
 	defer e.wg.Done()
 	
-	ticker := time.NewTicker(e.config.UpdateInterval)
+	ticker := time.NewTicker(e.config.TWAPConfig.UpdateInterval)
 	defer ticker.Stop()
 
 	for {
@@ -212,42 +212,6 @@ func (e *Engine) metricsUpdater(ctx context.Context) {
 			e.updateMetrics()
 		}
 	}
-}
-
-// updatePriceFeeds fetches latest price data from all sources
-func (e *Engine) updatePriceFeeds() error {
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-
-    tokenPairs := []string{"ETH_USDC", "ATOM_USDC", "XLM_USDC"}
-    
-    for _, pair := range tokenPairs {
-        // Chainlink Price Feed
-        if price, err := e.getChainlinkPrice(ctx, pair); err == nil {
-            if err := e.storePricePoint(pair, "chainlink", price); err != nil {
-                e.logger.Error("Failed to store Chainlink price", 
-                    zap.String("pair", pair), zap.Error(err))
-            }
-        }
-
-        // CoinGecko API
-        if price, err := e.getCoinGeckoPrice(ctx, pair); err == nil {
-            if err := e.storePricePoint(pair, "coingecko", price); err != nil {
-                e.logger.Error("Failed to store CoinGecko price", 
-                    zap.String("pair", pair), zap.Error(err))
-            }
-        }
-
-        // DEX aggregator prices (1inch, etc.)
-        if price, err := e.getDEXPrice(ctx, pair); err == nil {
-            if err := e.storePricePoint(pair, "dex", price); err != nil {
-                e.logger.Error("Failed to store DEX price", 
-                    zap.String("pair", pair), zap.Error(err))
-            }
-        }
-    }
-
-    return nil
 }
 
 // processExecutableOrders finds orders ready for execution
@@ -387,7 +351,7 @@ func (e *Engine) executeInterval(request *ExecutionRequest) *ExecutionResponse {
 		}
 	}
 
-	// Execute the swap (mock implementation)
+	// Execute the swap
 	executedAmount, executionPrice, txHash, gasUsed, err := e.executeSwap(
 		adapter,
 		order.SourceToken,
@@ -409,6 +373,9 @@ func (e *Engine) executeInterval(request *ExecutionRequest) *ExecutionResponse {
 		actualSlippage = e.calculateSlippage(request.PriceHint, executionPrice)
 	}
 
+	// Convert uint64 to *int64 for database storage
+	gasUsedInt64 := int64(gasUsed)
+
 	// Record execution in database
 	executionRecord := &database.ExecutionRecord{
 		OrderID:        request.OrderID,
@@ -416,7 +383,7 @@ func (e *Engine) executeInterval(request *ExecutionRequest) *ExecutionResponse {
 		Timestamp:      time.Now(),
 		Amount:         executedAmount,
 		Price:          executionPrice,
-		GasUsed:        &gasUsed,
+		GasUsed:        &gasUsedInt64,
 		Slippage:       &actualSlippage,
 		TxHash:         &txHash,
 		ChainID:        order.TargetChain,
@@ -456,7 +423,7 @@ func (e *Engine) executeInterval(request *ExecutionRequest) *ExecutionResponse {
 		ExecutedAmount: executedAmount,
 		ExecutionPrice: executionPrice,
 		TxHash:         txHash,
-		GasUsed:        gasUsed,
+		GasUsed:        gasUsed, // Now both are uint64
 		Slippage:       actualSlippage,
 	}
 }
@@ -466,7 +433,7 @@ func (e *Engine) executeSwap(
 	adapter adapters.ChainAdapter,
 	sourceToken, targetToken string,
 	amount, priceHint decimal.Decimal,
-) (executedAmount, executionPrice decimal.Decimal, txHash string, gasUsed int64, err error) {
+) (executedAmount, executionPrice decimal.Decimal, txHash string, gasUsed uint64, err error) {
 	// Mock implementation - in reality this would call the appropriate adapter
 	// to execute the swap on the target chain
 	
@@ -481,8 +448,8 @@ func (e *Engine) executeSwap(
 	// Mock transaction hash
 	txHash = fmt.Sprintf("0x%x", time.Now().UnixNano())
 	
-	// Mock gas usage
-	gasUsed = 150000 + time.Now().Unix()%50000
+	// Mock gas usage - cast to uint64
+	gasUsed = uint64(150000 + time.Now().Unix()%50000)
 
 	e.logger.Debug("Mock swap executed",
 		zap.String("source_token", sourceToken),

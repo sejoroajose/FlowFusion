@@ -10,6 +10,8 @@ import (
 
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
+
+	"flowfusion/bridge-orchestrator/internal/database"
 )
 
 // PriceFeedConfig holds configuration for price feed sources

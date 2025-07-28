@@ -60,6 +60,7 @@ type PricePoint struct {
 	Volume    *decimal.Decimal `json:"volume" db:"volume"`
 	Source    string          `json:"source" db:"source"`
 	ChainID   string          `json:"chain_id" db:"chain_id"`
+	CreatedAt	time.Time       `json:"created_at" db:"created_at"`
 }
 
 

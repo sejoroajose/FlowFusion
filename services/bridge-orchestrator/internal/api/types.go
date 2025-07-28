@@ -1,15 +1,21 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 )
 
-// Request types
+// Request/Response Types
 
-// CreateOrderRequest represents a request to create a new TWAP order
 type CreateOrderRequest struct {
 	ID               string                 `json:"id" binding:"required"`
 	UserAddress      string                 `json:"user_address" binding:"required"`
@@ -27,7 +33,6 @@ type CreateOrderRequest struct {
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 }
 
-// TWAPConfigRequest represents TWAP configuration in requests
 type TWAPConfigRequest struct {
 	WindowMinutes       int             `json:"window_minutes" binding:"required,min=5,max=1440"`
 	ExecutionIntervals  int             `json:"execution_intervals" binding:"required,min=2,max=20"`
@@ -36,40 +41,39 @@ type TWAPConfigRequest struct {
 	EnableMEVProtection bool            `json:"enable_mev_protection"`
 }
 
-// ExecuteOrderRequest represents a request to manually execute an order
-type ExecuteOrderRequest struct {
-	Force bool `json:"force,omitempty"` // Force execution even if conditions aren't met
-}
-
-// Response types
-
-// OrderResponse represents a complete order in API responses
 type OrderResponse struct {
-	ID                string                    `json:"id"`
-	UserAddress       string                    `json:"user_address"`
-	SourceChain       string                    `json:"source_chain"`
-	TargetChain       string                    `json:"target_chain"`
-	SourceToken       string                    `json:"source_token"`
-	SourceAmount      decimal.Decimal           `json:"source_amount"`
-	TargetToken       string                    `json:"target_token"`
-	TargetRecipient   string                    `json:"target_recipient"`
-	MinReceived       decimal.Decimal           `json:"min_received"`
-	TWAPConfig        TWAPConfigResponse        `json:"twap_config"`
-	HTLCHash          string                    `json:"htlc_hash"`
-	TimeoutHeight     int64                     `json:"timeout_height"`
-	TimeoutTimestamp  int64                     `json:"timeout_timestamp"`
-	CreatedAt         time.Time                 `json:"created_at"`
-	UpdatedAt         time.Time                 `json:"updated_at"`
-	ExecutedAmount    decimal.Decimal           `json:"executed_amount"`
-	LastExecution     *time.Time                `json:"last_execution"`
-	Status            string                    `json:"status"`
-	AveragePrice      decimal.Decimal           `json:"average_price"`
-	CompletionRate    float64                   `json:"completion_rate"`
+	ID                string                     `json:"id"`
+	UserAddress       string                     `json:"user_address"`
+	SourceChain       string                     `json:"source_chain"`
+	TargetChain       string                     `json:"target_chain"`
+	SourceToken       string                     `json:"source_token"`
+	SourceAmount      decimal.Decimal            `json:"source_amount"`
+	TargetToken       string                     `json:"target_token"`
+	TargetRecipient   string                     `json:"target_recipient"`
+	MinReceived       decimal.Decimal            `json:"min_received"`
+	TWAPConfig        TWAPConfigResponse         `json:"twap_config"`
+	HTLCHash          string                     `json:"htlc_hash"`
+	TimeoutHeight     int64                      `json:"timeout_height"`
+	TimeoutTimestamp  int64                      `json:"timeout_timestamp"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	UpdatedAt         time.Time                  `json:"updated_at"`
+	ExecutedAmount    decimal.Decimal            `json:"executed_amount"`
+	LastExecution     *time.Time                 `json:"last_execution"`
+	Status            string                     `json:"status"`
+	AveragePrice      decimal.Decimal            `json:"average_price"`
+	CompletionRate    float64                    `json:"completion_rate"`
 	ExecutionHistory  []ExecutionHistoryResponse `json:"execution_history"`
-	Metadata          map[string]interface{}    `json:"metadata,omitempty"`
+	Metadata          map[string]interface{}     `json:"metadata,omitempty"`
 }
 
-// OrderSummaryResponse represents a summarized order for list endpoints
+type TWAPConfigResponse struct {
+	WindowMinutes       int             `json:"window_minutes"`
+	ExecutionIntervals  int             `json:"execution_intervals"`
+	MaxSlippage         int             `json:"max_slippage"`
+	MinFillSize         decimal.Decimal `json:"min_fill_size"`
+	EnableMEVProtection bool            `json:"enable_mev_protection"`
+}
+
 type OrderSummaryResponse struct {
 	ID                string          `json:"id"`
 	SourceChain       string          `json:"source_chain"`
@@ -84,16 +88,6 @@ type OrderSummaryResponse struct {
 	TotalIntervals    int             `json:"total_intervals"`
 }
 
-// TWAPConfigResponse represents TWAP configuration in responses
-type TWAPConfigResponse struct {
-	WindowMinutes       int             `json:"window_minutes"`
-	ExecutionIntervals  int             `json:"execution_intervals"`
-	MaxSlippage         int             `json:"max_slippage"`
-	MinFillSize         decimal.Decimal `json:"min_fill_size"`
-	EnableMEVProtection bool            `json:"enable_mev_protection"`
-}
-
-// ExecutionHistoryResponse represents execution history in API responses
 type ExecutionHistoryResponse struct {
 	IntervalNumber int             `json:"interval_number"`
 	Timestamp      time.Time       `json:"timestamp"`
@@ -105,101 +99,22 @@ type ExecutionHistoryResponse struct {
 	ChainID        string          `json:"chain_id"`
 }
 
-// PriceResponse represents price data in API responses
-type PriceResponse struct {
-	TokenPair    string          `json:"token_pair"`
-	Price        decimal.Decimal `json:"price"`
-	Timestamp    time.Time       `json:"timestamp"`
-	Source       string          `json:"source"`
-	WindowMinutes *int           `json:"window_minutes,omitempty"`
-}
-
-// TWAPPriceResponse represents TWAP price calculation results
-type TWAPPriceResponse struct {
-	TokenPair        string          `json:"token_pair"`
-	WindowMinutes    int             `json:"window_minutes"`
-	TWAPPrice        decimal.Decimal `json:"twap_price"`
-	CurrentPrice     decimal.Decimal `json:"current_price,omitempty"`
-	PriceChange      decimal.Decimal `json:"price_change,omitempty"`
-	DataPoints       int             `json:"data_points"`
-	CalculatedAt     time.Time       `json:"calculated_at"`
-}
-
-// ChainStatusResponse represents blockchain status in API responses
-type ChainStatusResponse struct {
-	ChainID         string     `json:"chain_id"`
-	Name            string     `json:"name"`
-	Enabled         bool       `json:"enabled"`
-	LastBlockHeight *int64     `json:"last_block_height,omitempty"`
-	LastBlockTime   *time.Time `json:"last_block_time,omitempty"`
-	AvgBlockTime    *string    `json:"avg_block_time,omitempty"`
-	GasPrice        *decimal.Decimal `json:"gas_price,omitempty"`
-	HealthStatus    string     `json:"health_status"`
-	LastHealthCheck time.Time  `json:"last_health_check"`
-}
-
-// ChainMetricsResponse represents chain performance metrics
-type ChainMetricsResponse struct {
-	ChainID              string          `json:"chain_id"`
-	Name                 string          `json:"name"`
-	OrderCount           int64           `json:"order_count"`
-	TotalVolume          decimal.Decimal `json:"total_volume"`
-	AverageBlockTime     string          `json:"average_block_time"`
-	CurrentBlockHeight   int64           `json:"current_block_height"`
-	GasPrice             decimal.Decimal `json:"gas_price"`
-	SuccessfulExecutions int64           `json:"successful_executions"`
-	FailedExecutions     int64           `json:"failed_executions"`
-	SuccessRate          float64         `json:"success_rate"`
-	LastHealthCheck      time.Time       `json:"last_health_check"`
-	HealthStatus         string          `json:"health_status"`
-}
-
-// MetricsResponse represents system performance metrics
-type MetricsResponse struct {
-	TotalExecutions      int64           `json:"total_executions"`
-	SuccessfulExecutions int64           `json:"successful_executions"`
-	FailedExecutions     int64           `json:"failed_executions"`
-	SuccessRate          float64         `json:"success_rate"`
-	AverageExecutionTime string          `json:"average_execution_time"`
-	AverageSlippage      decimal.Decimal `json:"average_slippage"`
-	TotalVolumeExecuted  decimal.Decimal `json:"total_volume_executed"`
-	LastExecutionTime    time.Time       `json:"last_execution_time"`
-}
-
-// StatisticsResponse represents system statistics
-type StatisticsResponse struct {
-	TotalOrders       int64                       `json:"total_orders"`
-	ActiveOrders      int64                       `json:"active_orders"`
-	CompletedOrders   int64                       `json:"completed_orders"`
-	CancelledOrders   int64                       `json:"cancelled_orders"`
-	TotalVolume       decimal.Decimal             `json:"total_volume"`
-	VolumeByChain     map[string]decimal.Decimal  `json:"volume_by_chain"`
-	VolumeByTimeframe map[string]decimal.Decimal  `json:"volume_by_timeframe"`
-	AverageSlippage   decimal.Decimal             `json:"average_slippage"`
-	AverageExecutionTime string                   `json:"average_execution_time"`
-	SuccessRate       float64                     `json:"success_rate"`
-	LastUpdateTime    time.Time                   `json:"last_update_time"`
-}
-
-// ErrorResponse represents API error responses
 type ErrorResponse struct {
-	Error   string                 `json:"error"`
-	Code    string                 `json:"code,omitempty"`
-	Details map[string]interface{} `json:"details,omitempty"`
-	RequestID string               `json:"request_id,omitempty"`
-	Timestamp time.Time             `json:"timestamp"`
-}
-
-// SuccessResponse represents successful API responses
-type SuccessResponse struct {
-	Success   bool                   `json:"success"`
-	Data      interface{}            `json:"data,omitempty"`
-	Message   string                 `json:"message,omitempty"`
+	Error     string                 `json:"error"`
+	Code      string                 `json:"code,omitempty"`
+	Details   map[string]interface{} `json:"details,omitempty"`
 	RequestID string                 `json:"request_id,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
 }
 
-// PaginationResponse represents pagination metadata
+type SuccessResponse struct {
+	Success   bool        `json:"success"`
+	Data      interface{} `json:"data,omitempty"`
+	Message   string      `json:"message,omitempty"`
+	RequestID string      `json:"request_id,omitempty"`
+	Timestamp time.Time   `json:"timestamp"`
+}
+
 type PaginationResponse struct {
 	Page       int   `json:"page"`
 	Limit      int   `json:"limit"`
@@ -209,161 +124,565 @@ type PaginationResponse struct {
 	HasPrev    bool  `json:"has_prev"`
 }
 
-// WebSocketMessage represents WebSocket message structure
-type WebSocketMessage struct {
-	Type      string                 `json:"type"`
-	Event     string                 `json:"event"`
-	Data      interface{}            `json:"data"`
-	Timestamp time.Time              `json:"timestamp"`
-	RequestID string                 `json:"request_id,omitempty"`
+type ListOrdersParams struct {
+	UserAddress   string `form:"user"`
+	SourceChain   string `form:"source_chain"`
+	TargetChain   string `form:"target_chain"`
+	Status        string `form:"status"`
+	CreatedAfter  string `form:"created_after"`
+	CreatedBefore string `form:"created_before"`
+	Limit         int    `form:"limit"`
+	Offset        int    `form:"offset"`
+	Page          int    `form:"page"`
+	SortBy        string `form:"sort_by"`
+	SortOrder     string `form:"sort_order"`
 }
 
-// WebSocket event types
+// Error codes
 const (
-	WSEventOrderCreated   = "order_created"
-	WSEventOrderUpdated   = "order_updated"
-	WSEventOrderExecuted  = "order_executed"
-	WSEventOrderCompleted = "order_completed"
-	WSEventOrderCancelled = "order_cancelled"
-	WSEventPriceUpdate    = "price_update"
-	WSEventChainStatus    = "chain_status"
-	WSEventError          = "error"
+	ErrCodeValidation         = "VALIDATION_ERROR"
+	ErrCodeNotFound          = "NOT_FOUND"
+	ErrCodeUnauthorized      = "UNAUTHORIZED"
+	ErrCodeForbidden         = "FORBIDDEN"
+	ErrCodeConflict          = "CONFLICT"
+	ErrCodeInternalError     = "INTERNAL_ERROR"
+	ErrCodeServiceUnavailable = "SERVICE_UNAVAILABLE"
+	ErrCodeRateLimit         = "RATE_LIMIT"
+	ErrCodeChainError        = "CHAIN_ERROR"
+	ErrCodeInsufficientFunds = "INSUFFICIENT_FUNDS"
+	ErrCodeSlippageExceeded  = "SLIPPAGE_EXCEEDED"
+	ErrCodeOrderExpired      = "ORDER_EXPIRED"
+	ErrCodeInvalidChain      = "INVALID_CHAIN"
+	ErrCodeInvalidToken      = "INVALID_TOKEN"
 )
 
-// Validation methods
+// Validation patterns
+var (
+	ethereumAddressPattern = regexp.MustCompile(`^0x[a-fA-F0-9]{40}$`)
+	cosmosAddressPattern   = regexp.MustCompile(`^cosmos[0-9a-z]{39}$`)
+	stellarAddressPattern  = regexp.MustCompile(`^G[A-Z2-7]{55}$`)
+	bitcoinAddressPattern  = regexp.MustCompile(`^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$`)
+	hashPattern           = regexp.MustCompile(`^0x[a-fA-F0-9]{64}$`)
+	orderIDPattern        = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	tokenPairPattern      = regexp.MustCompile(`^[A-Z0-9_]{1,20}_[A-Z0-9_]{1,20}$`)
+	chainIDPattern        = regexp.MustCompile(`^[a-z0-9_-]{1,20}$`)
+)
 
-// Validate validates a CreateOrderRequest
-func (r *CreateOrderRequest) Validate() error {
-	// Basic validation
-	if r.ID == "" {
-		return errors.New("order ID is required")
+// Middleware Functions
+
+func (h *Handler) authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip auth for health checks
+		if strings.HasPrefix(c.Request.URL.Path, "/health") {
+			c.Next()
+			return
+		}
+
+		// Extract user address from header (in production, validate JWT)
+		userAddress := c.GetHeader("X-User-Address")
+		if userAddress == "" {
+			c.JSON(http.StatusUnauthorized, ErrorResponse{
+				Error:     "Authentication required",
+				Code:      ErrCodeUnauthorized,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		// Validate address format
+		if !h.isValidAddress(userAddress) {
+			c.JSON(http.StatusUnauthorized, ErrorResponse{
+				Error:     "Invalid user address format",
+				Code:      ErrCodeUnauthorized,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_address", userAddress)
+		c.Set("authenticated", true)
+		c.Next()
 	}
-	
-	if r.UserAddress == "" {
-		return errors.New("user address is required")
-	}
-	
-	if r.SourceChain == r.TargetChain {
-		return errors.New("source and target chains must be different")
-	}
-	
-	if r.SourceAmount.LessThanOrEqual(decimal.Zero) {
-		return errors.New("source amount must be greater than zero")
-	}
-	
-	if r.MinReceived.LessThanOrEqual(decimal.Zero) {
-		return errors.New("minimum received amount must be greater than zero")
-	}
-	
-	if r.TimeoutHeight <= 0 {
-		return errors.New("timeout height must be greater than zero")
-	}
-	
-	if r.TimeoutTimestamp <= time.Now().Unix() {
-		return errors.New("timeout timestamp must be in the future")
-	}
-	
-	// Validate TWAP config
-	return r.TWAPConfig.Validate()
 }
 
-// Validate validates a TWAPConfigRequest
-func (t *TWAPConfigRequest) Validate() error {
-	if t.WindowMinutes < 5 || t.WindowMinutes > 1440 {
+func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Additional admin authentication
+		adminToken := c.GetHeader("X-Admin-Token")
+		if adminToken == "" || !h.isValidAdminToken(adminToken) {
+			c.JSON(http.StatusForbidden, ErrorResponse{
+				Error:     "Admin access required",
+				Code:      ErrCodeForbidden,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		c.Set("admin", true)
+		c.Next()
+	}
+}
+
+func (h *Handler) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userAddress := h.getUserAddress(c)
+		if userAddress == "" {
+			c.Next()
+			return
+		}
+
+		if !h.checkRateLimit(userAddress) {
+			c.JSON(http.StatusTooManyRequests, ErrorResponse{
+				Error:     "Rate limit exceeded",
+				Code:      ErrCodeRateLimit,
+				Details:   map[string]interface{}{"retry_after": "60s"},
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// Validation Middleware
+
+func (h *Handler) validateCreateOrder() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Additional validation beyond binding
+		var req CreateOrderRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Invalid request format",
+				Code:      ErrCodeValidation,
+				Details:   map[string]interface{}{"binding_error": err.Error()},
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		if err := h.validateCreateOrderRequest(&req); err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Validation failed",
+				Code:      ErrCodeValidation,
+				Details:   map[string]interface{}{"validation_error": err.Error()},
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+
+		c.Set("validated_request", req)
+		c.Next()
+	}
+}
+
+func (h *Handler) validateOrderID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		orderID := c.Param("id")
+		if !h.isValidOrderID(orderID) {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Invalid order ID format",
+				Code:      ErrCodeValidation,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func (h *Handler) validateTokenPair() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		pair := c.Param("pair")
+		if !h.isValidTokenPair(pair) {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Invalid token pair format",
+				Code:      ErrCodeValidation,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func (h *Handler) validateChainID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		chainID := c.Param("id")
+		if !h.isValidChainID(chainID) {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Invalid chain ID format",
+				Code:      ErrCodeValidation,
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func (h *Handler) validateListOrders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		params := h.parseListOrdersParams(c)
+		if err := h.validateListOrdersParams(params); err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "Invalid query parameters",
+				Code:      ErrCodeValidation,
+				Details:   map[string]interface{}{"validation_error": err.Error()},
+				Timestamp: time.Now(),
+			})
+			c.Abort()
+			return
+		}
+		c.Set("validated_params", params)
+		c.Next()
+	}
+}
+
+// Helper Functions
+
+func (h *Handler) getUserAddress(c *gin.Context) string {
+	if addr, exists := c.Get("user_address"); exists {
+		return addr.(string)
+	}
+	return ""
+}
+
+func (h *Handler) getRequestID(c *gin.Context) string {
+	if id, exists := c.Get("request_id"); exists {
+		return id.(string)
+	}
+	return ""
+}
+
+func (h *Handler) canAccessOrder(userAddress, orderUserAddress string) bool {
+	// In production, implement proper access control
+	return userAddress == orderUserAddress || h.isAdmin(userAddress)
+}
+
+func (h *Handler) canModifyOrder(userAddress, orderUserAddress string) bool {
+	// In production, implement proper modification control
+	return userAddress == orderUserAddress
+}
+
+func (h *Handler) canCancelOrder(status string) bool {
+	cancelableStatuses := []string{
+		"pending",
+		"executing",
+		"partially_filled",
+	}
+	
+	for _, s := range cancelableStatuses {
+		if status == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) isAdmin(userAddress string) bool {
+	// In production, check admin permissions from database or config
+	return false // Default to false for security
+}
+
+func (h *Handler) isValidAdminToken(token string) bool {
+	// In production, validate admin token
+	return token == "admin-secret-token" // This is just for demo
+}
+
+func (h *Handler) checkRateLimit(userAddress string) bool {
+	now := time.Now()
+	
+	limiter, exists := h.rateLimiter[userAddress]
+	if !exists {
+		h.rateLimiter[userAddress] = &RateLimiter{
+			tokens:     DefaultRateLimit - 1,
+			capacity:   DefaultRateLimit,
+			lastRefill: now,
+		}
+		return true
+	}
+
+	// Refill tokens based on time elapsed
+	elapsed := now.Sub(limiter.lastRefill)
+	tokensToAdd := int(elapsed.Seconds())
+	
+	limiter.tokens += tokensToAdd
+	if limiter.tokens > limiter.capacity {
+		limiter.tokens = limiter.capacity
+	}
+	limiter.lastRefill = now
+
+	if limiter.tokens <= 0 {
+		return false
+	}
+
+	limiter.tokens--
+	return true
+}
+
+func (h *Handler) isAllowedOrigin(origin string) bool {
+	allowedOrigins := []string{
+		"http://localhost:3000",
+		"https://app.flowfusion.io",
+		"https://staging.flowfusion.io",
+	}
+	
+	for _, allowed := range allowedOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// Cache Functions
+
+func (h *Handler) getFromCache(key string) interface{} {
+	// In production, use Redis with proper TTL
+	return h.cache[key]
+}
+
+func (h *Handler) setCache(key string, value interface{}, ttl time.Duration) {
+	// In production, use Redis with proper TTL
+	h.cache[key] = value
+}
+
+func (h *Handler) clearOrderCache(orderID string) {
+	// Clear all cache entries related to this order
+	delete(h.cache, "order:"+orderID)
+	// In production, clear all related cache patterns
+}
+
+// Validation Functions
+
+func (h *Handler) validateCreateOrderRequest(req *CreateOrderRequest) error {
+	// Validate order ID
+	if !h.isValidOrderID(req.ID) {
+		return errors.New("invalid order ID format")
+	}
+
+	// Validate addresses
+	if !h.isValidAddress(req.UserAddress) {
+		return errors.New("invalid user address")
+	}
+
+	if !h.isValidRecipientAddress(req.TargetRecipient, req.TargetChain) {
+		return errors.New("invalid target recipient address")
+	}
+
+	// Validate chains
+	if !h.isValidChainID(req.SourceChain) || !h.isValidChainID(req.TargetChain) {
+		return errors.New("invalid chain ID")
+	}
+
+	if req.SourceChain == req.TargetChain {
+		return errors.New("source and target chains must be different")
+	}
+
+	// Validate amounts
+	if req.SourceAmount.LessThanOrEqual(decimal.Zero) {
+		return errors.New("source amount must be greater than zero")
+	}
+
+	if req.MinReceived.LessThanOrEqual(decimal.Zero) {
+		return errors.New("minimum received amount must be greater than zero")
+	}
+
+	// Validate HTLC hash
+	if !h.isValidHash(req.HTLCHash) {
+		return errors.New("invalid HTLC hash format")
+	}
+
+	// Validate timeouts
+	if req.TimeoutHeight <= 0 {
+		return errors.New("timeout height must be greater than zero")
+	}
+
+	if req.TimeoutTimestamp <= time.Now().Unix() {
+		return errors.New("timeout timestamp must be in the future")
+	}
+
+	// Validate TWAP config
+	return h.validateTWAPConfig(&req.TWAPConfig)
+}
+
+func (h *Handler) validateTWAPConfig(config *TWAPConfigRequest) error {
+	if config.WindowMinutes < 5 || config.WindowMinutes > 1440 {
 		return errors.New("window minutes must be between 5 and 1440")
 	}
-	
-	if t.ExecutionIntervals < 2 || t.ExecutionIntervals > 20 {
+
+	if config.ExecutionIntervals < 2 || config.ExecutionIntervals > 20 {
 		return errors.New("execution intervals must be between 2 and 20")
 	}
-	
-	if t.MaxSlippage < 1 || t.MaxSlippage > 1000 {
+
+	if config.MaxSlippage < 1 || config.MaxSlippage > 1000 {
 		return errors.New("max slippage must be between 1 and 1000 basis points")
 	}
-	
-	if t.MinFillSize.LessThanOrEqual(decimal.Zero) {
+
+	if config.MinFillSize.LessThanOrEqual(decimal.Zero) {
 		return errors.New("minimum fill size must be greater than zero")
 	}
-	
+
 	// Check that intervals fit within window
-	intervalDuration := t.WindowMinutes / t.ExecutionIntervals
+	intervalDuration := config.WindowMinutes / config.ExecutionIntervals
 	if intervalDuration < 1 {
 		return errors.New("execution intervals too frequent for the given window")
 	}
-	
+
 	return nil
 }
 
-// Query parameter helpers
+func (h *Handler) parseListOrdersParams(c *gin.Context) *ListOrdersParams {
+	limitStr := c.DefaultQuery("limit", "20")
+	offsetStr := c.DefaultQuery("offset", "0")
+	pageStr := c.DefaultQuery("page", "1")
 
-// ListOrdersQuery represents query parameters for listing orders
-type ListOrdersQuery struct {
-	UserAddress  string `form:"user"`
-	SourceChain  string `form:"source_chain"`
-	TargetChain  string `form:"target_chain"`
-	Status       string `form:"status"`
-	CreatedAfter string `form:"created_after"`
-	CreatedBefore string `form:"created_before"`
-	Limit        int    `form:"limit" binding:"min=1,max=100"`
-	Offset       int    `form:"offset" binding:"min=0"`
-	SortBy       string `form:"sort_by"`
-	SortOrder    string `form:"sort_order"`
-}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 || limit > MaxPageSize {
+		limit = DefaultPageSize
+	}
 
-// PriceHistoryQuery represents query parameters for price history
-type PriceHistoryQuery struct {
-	TokenPair string `form:"pair" binding:"required"`
-	Window    int    `form:"window" binding:"min=5,max=10080"` // Max 1 week
-	Source    string `form:"source"`
-	ChainID   string `form:"chain_id"`
-	Format    string `form:"format"` // json, csv
-}
+	offset, err := strconv.Atoi(offsetStr)
+	if err != nil || offset < 0 {
+		offset = 0
+	}
 
-// TWAPQuery represents query parameters for TWAP calculations
-type TWAPQuery struct {
-	TokenPair string `form:"pair" binding:"required"`
-	Window    int    `form:"window" binding:"min=5,max=1440"`
-	Source    string `form:"source"`
-}
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page <= 0 {
+		page = 1
+	}
 
-// Default values for query parameters
-const (
-	DefaultLimit       = 20
-	DefaultOffset      = 0
-	DefaultWindow      = 60
-	DefaultSortBy      = "created_at"
-	DefaultSortOrder   = "desc"
-	MaxLimit           = 100
-	MinWindow          = 5
-	MaxWindow          = 1440
-	MaxHistoryWindow   = 10080 // 1 week
-)
+	// If page is provided, calculate offset
+	if c.Query("page") != "" {
+		offset = (page - 1) * limit
+	}
 
-// Helper functions for response building
-
-// NewSuccessResponse creates a standardized success response
-func NewSuccessResponse(data interface{}, message string) *SuccessResponse {
-	return &SuccessResponse{
-		Success:   true,
-		Data:      data,
-		Message:   message,
-		Timestamp: time.Now().UTC(),
+	return &ListOrdersParams{
+		UserAddress:   c.Query("user"),
+		SourceChain:   c.Query("source_chain"),
+		TargetChain:   c.Query("target_chain"),
+		Status:        c.Query("status"),
+		CreatedAfter:  c.Query("created_after"),
+		CreatedBefore: c.Query("created_before"),
+		Limit:         limit,
+		Offset:        offset,
+		Page:          page,
+		SortBy:        c.DefaultQuery("sort_by", "created_at"),
+		SortOrder:     c.DefaultQuery("sort_order", "desc"),
 	}
 }
 
-// NewErrorResponse creates a standardized error response
-func NewErrorResponse(err error, code string) *ErrorResponse {
-	return &ErrorResponse{
-		Error:     err.Error(),
-		Code:      code,
-		Timestamp: time.Now().UTC(),
+func (h *Handler) validateListOrdersParams(params *ListOrdersParams) error {
+	if params.UserAddress != "" && !h.isValidAddress(params.UserAddress) {
+		return errors.New("invalid user address")
+	}
+
+	if params.SourceChain != "" && !h.isValidChainID(params.SourceChain) {
+		return errors.New("invalid source chain")
+	}
+
+	if params.TargetChain != "" && !h.isValidChainID(params.TargetChain) {
+		return errors.New("invalid target chain")
+	}
+
+	validStatuses := []string{"pending", "executing", "partially_filled", "completed", "cancelled", "expired", "refunded", "claimed"}
+	if params.Status != "" {
+		isValid := false
+		for _, status := range validStatuses {
+			if params.Status == status {
+				isValid = true
+				break
+			}
+		}
+		if !isValid {
+			return errors.New("invalid status")
+		}
+	}
+
+	validSortFields := []string{"created_at", "updated_at", "source_amount", "executed_amount", "completion_rate"}
+	isValidSort := false
+	for _, field := range validSortFields {
+		if params.SortBy == field {
+			isValidSort = true
+			break
+		}
+	}
+	if !isValidSort {
+		return errors.New("invalid sort field")
+	}
+
+	if params.SortOrder != "asc" && params.SortOrder != "desc" {
+		return errors.New("invalid sort order")
+	}
+
+	return nil
+}
+
+// Format Validation Functions
+
+func (h *Handler) isValidOrderID(orderID string) bool {
+	return orderIDPattern.MatchString(orderID) && len(orderID) >= 4 && len(orderID) <= 64
+}
+
+func (h *Handler) isValidAddress(address string) bool {
+	// Support multiple address formats
+	return ethereumAddressPattern.MatchString(address) ||
+		cosmosAddressPattern.MatchString(address) ||
+		stellarAddressPattern.MatchString(address) ||
+		bitcoinAddressPattern.MatchString(address)
+}
+
+func (h *Handler) isValidRecipientAddress(address, chainID string) bool {
+	switch chainID {
+	case "ethereum", "polygon", "arbitrum", "optimism":
+		return ethereumAddressPattern.MatchString(address)
+	case "cosmos", "osmosis":
+		return cosmosAddressPattern.MatchString(address)
+	case "stellar":
+		return stellarAddressPattern.MatchString(address)
+	case "bitcoin":
+		return bitcoinAddressPattern.MatchString(address)
+	default:
+		return h.isValidAddress(address) // Fallback to any valid format
 	}
 }
 
-// NewPaginationResponse creates pagination metadata
+func (h *Handler) isValidHash(hash string) bool {
+	return hashPattern.MatchString(hash)
+}
+
+func (h *Handler) isValidTokenPair(pair string) bool {
+	return tokenPairPattern.MatchString(pair)
+}
+
+func (h *Handler) isValidChainID(chainID string) bool {
+	return chainIDPattern.MatchString(chainID)
+}
+
+// Utility Functions
+
+func generateRequestID() string {
+	bytes := make([]byte, 16)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
 func NewPaginationResponse(page, limit int, total int64) *PaginationResponse {
 	totalPages := int((total + int64(limit) - 1) / int64(limit))
-	
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
 	return &PaginationResponse{
 		Page:       page,
 		Limit:      limit,
@@ -374,27 +693,19 @@ func NewPaginationResponse(page, limit int, total int64) *PaginationResponse {
 	}
 }
 
-// Response status codes
-const (
-	StatusSuccess = "success"
-	StatusError   = "error"
-	StatusPending = "pending"
-)
+func NewSuccessResponse(data interface{}, message string) *SuccessResponse {
+	return &SuccessResponse{
+		Success:   true,
+		Data:      data,
+		Message:   message,
+		Timestamp: time.Now(),
+	}
+}
 
-// Error codes for API responses
-const (
-	ErrCodeValidation      = "VALIDATION_ERROR"
-	ErrCodeNotFound        = "NOT_FOUND"
-	ErrCodeUnauthorized    = "UNAUTHORIZED"
-	ErrCodeForbidden       = "FORBIDDEN"
-	ErrCodeConflict        = "CONFLICT"
-	ErrCodeInternalError   = "INTERNAL_ERROR"
-	ErrCodeServiceUnavailable = "SERVICE_UNAVAILABLE"
-	ErrCodeRateLimit       = "RATE_LIMIT"
-	ErrCodeChainError      = "CHAIN_ERROR"
-	ErrCodeInsufficientFunds = "INSUFFICIENT_FUNDS"
-	ErrCodeSlippageExceeded = "SLIPPAGE_EXCEEDED"
-	ErrCodeOrderExpired    = "ORDER_EXPIRED"
-	ErrCodeInvalidChain    = "INVALID_CHAIN"
-	ErrCodeInvalidToken    = "INVALID_TOKEN"
-)
+func NewErrorResponse(err error, code string) *ErrorResponse {
+	return &ErrorResponse{
+		Error:     err.Error(),
+		Code:      code,
+		Timestamp: time.Now(),
+	}
+}
