@@ -62,6 +62,7 @@ type PricePoint struct {
 	ChainID   string          `json:"chain_id" db:"chain_id"`
 }
 
+
 // HTLC represents a Hash Time Lock Contract
 type HTLC struct {
 	Address          string     `json:"address" db:"address"`

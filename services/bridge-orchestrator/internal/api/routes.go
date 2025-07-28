@@ -274,6 +274,34 @@ func (h *Handler) getOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+func setupHealthRoutes(router *gin.Engine, db database.DB) {
+    health := router.Group("/health")
+    {
+        health.GET("/", basicHealthCheck)
+        health.GET("/ready", readinessCheck(db))
+        health.GET("/live", livenessCheck)
+    }
+}
+
+func readinessCheck(db database.DB) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        if err := db.Ping(); err != nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{
+                "status": "not ready",
+                "database": "unhealthy",
+                "error": err.Error(),
+            })
+            return
+        }
+
+        c.JSON(http.StatusOK, gin.H{
+            "status": "ready",
+            "database": "healthy",
+            "timestamp": time.Now().UTC(),
+        })
+    }
+}
+
 func (h *Handler) cancelOrder(c *gin.Context) {
 	orderID := c.Param("id")
 	userAddress := c.GetHeader("X-User-Address") // In production, extract from JWT

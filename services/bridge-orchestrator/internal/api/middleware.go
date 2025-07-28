@@ -262,28 +262,30 @@ func HealthCheckSkipMiddleware() gin.HandlerFunc {
 
 // MetricsMiddleware collects request metrics
 func MetricsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		
-		c.Next()
-		
-		duration := time.Since(start)
-		status := c.Writer.Status()
-		method := c.Request.Method
-		path := c.FullPath()
+    return func(c *gin.Context) {
+        start := time.Now()
+        
+        c.Next()
+        
+        duration := time.Since(start)
+        status := c.Writer.Status()
+        method := c.Request.Method
+        path := c.FullPath()
 
-		// In production, send these metrics to your monitoring system
-		// For now, we'll just log them at debug level
-		if logger, exists := c.Get("logger"); exists {
-			logger.(*zap.Logger).Debug("Request metrics",
-				zap.String("method", method),
-				zap.String("path", path),
-				zap.Int("status", status),
-				zap.Duration("duration", duration),
-			)
-		}
-	}
+        // Get logger from context
+        if loggerInterface, exists := c.Get("logger"); exists {
+            if logger, ok := loggerInterface.(*zap.Logger); ok {
+                logger.Debug("Request metrics",
+                    zap.String("method", method),
+                    zap.String("path", path),
+                    zap.Int("status", status),
+                    zap.Duration("duration", duration),
+                )
+            }
+        }
+    }
 }
+
 
 // CompressionMiddleware handles response compression
 func CompressionMiddleware() gin.HandlerFunc {

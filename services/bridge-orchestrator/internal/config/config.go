@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"fmt"
 )
 
 // Config holds all configuration for the bridge orchestrator
@@ -170,6 +171,10 @@ func Load() (*Config, error) {
 		CoingeckoAPIKey: getEnv("COINGECKO_API_KEY", ""),
 		ChainlinkAPIKey: getEnv("CHAINLINK_API_KEY", ""),
 		PythAPIKey:      getEnv("PYTH_API_KEY", ""),
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	return cfg, nil

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+	"context"
 
 	_ "github.com/lib/pq" 
 	"go.uber.org/zap"
@@ -27,6 +28,12 @@ type DB interface {
 	GetPriceHistory(tokenPair string, windowMinutes int) ([]*PricePoint, error)
 	UpdatePriceHistory(tokenPair string, points []*PricePoint) error
 
+	// Price point methods
+    StorePricePoint(point *PricePoint) error
+    GetPricePoints(tokenPair string, since time.Time) ([]*PricePoint, error)
+    GetLatestPrice(tokenPair, source string) (*PricePoint, error)
+    CleanupOldPricePoints(olderThan time.Time) error
+
 	// HTLC operations
 	CreateHTLC(htlc *HTLC) error
 	GetHTLC(htlcAddress string) (*HTLC, error)
@@ -47,37 +54,29 @@ type PostgreSQLDB struct {
 	logger *zap.Logger
 }
 
-// Initialize creates a new database connection
 func Initialize(databaseURL string) (DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
+    db, err := sql.Open("postgres", databaseURL)
+    if err != nil {
+        return nil, err
+    }
 
-	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+    // Production connection pool settings
+    db.SetMaxOpenConns(25)
+    db.SetMaxIdleConns(5)
+    db.SetConnMaxLifetime(5 * time.Minute)
+    db.SetConnMaxIdleTime(2 * time.Minute)
 
-	// Test connection
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
+    // Test connection
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    
+    if err := db.PingContext(ctx); err != nil {
+        return nil, fmt.Errorf("failed to ping database: %w", err)
+    }
 
-	logger, _ := zap.NewDevelopment()
-
-	pgDB := &PostgreSQLDB{
-		db:     db,
-		logger: logger,
-	}
-
-	// Initialize schema
-	if err := pgDB.initSchema(); err != nil {
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
-	}
-
-	return pgDB, nil
+    return &PostgreSQLDB{db: db}, nil
 }
+
 
 // initSchema creates the necessary database tables
 func (db *PostgreSQLDB) initSchema() error {
@@ -308,28 +307,39 @@ func (db *PostgreSQLDB) GetOrdersByUser(userAddress string, limit, offset int) (
 }
 
 func (db *PostgreSQLDB) UpdateOrder(order *Order) error {
-	query := `
-		UPDATE orders SET
-			executed_amount = $2,
-			last_execution = $3,
-			status = $4,
-			average_price = $5,
-			updated_at = NOW()
-		WHERE id = $1
-	`
+    query := `
+        UPDATE orders SET
+            executed_amount = $2,
+            last_execution = $3,
+            status = $4,
+            average_price = $5,
+            updated_at = NOW()
+        WHERE id = $1
+    `
 
-	_, err := db.db.Exec(
-		query,
-		order.ID, order.ExecutedAmount, order.LastExecution,
-		order.Status, order.AveragePrice,
-	)
+    result, err := db.db.Exec(
+        query,
+        order.ID, 
+        order.ExecutedAmount,
+        order.LastExecution,
+        order.Status,
+        order.AveragePrice,
+    )
+    
+    if err != nil {
+        return err
+    }
 
-	if err != nil {
-		db.logger.Error("Failed to update order", zap.Error(err), zap.String("order_id", order.ID))
-		return err
-	}
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return err
+    }
 
-	return nil
+    if rowsAffected == 0 {
+        return ErrOrderNotFound
+    }
+
+    return nil
 }
 
 func (db *PostgreSQLDB) GetExecutableOrders() ([]*Order, error) {
@@ -619,6 +629,112 @@ func (db *PostgreSQLDB) GetChainStatus(chainID string) (*ChainStatus, error) {
 	}
 
 	return status, nil
+}
+
+func (db *PostgreSQLDB) StorePricePoint(point *PricePoint) error {
+    query := `
+        INSERT INTO price_points (token_pair, source, price, volume, timestamp, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    `
+    
+    _, err := db.db.Exec(query,
+        point.TokenPair,
+        point.Source, 
+        point.Price,
+        point.Volume,
+        point.Timestamp,
+        point.CreatedAt,
+    )
+    
+    return err
+}
+
+func (db *PostgreSQLDB) GetPricePoints(tokenPair string, since time.Time) ([]*PricePoint, error) {
+    query := `
+        SELECT id, token_pair, source, price, volume, timestamp, created_at
+        FROM price_points
+        WHERE token_pair = $1 AND timestamp >= $2
+        ORDER BY timestamp ASC
+    `
+    
+    rows, err := db.db.Query(query, tokenPair, since)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var points []*PricePoint
+    for rows.Next() {
+        point := &PricePoint{}
+        err := rows.Scan(
+            &point.ID,
+            &point.TokenPair,
+            &point.Source,
+            &point.Price,
+            &point.Volume,
+            &point.Timestamp,
+            &point.CreatedAt,
+        )
+        if err != nil {
+            return nil, err
+        }
+        points = append(points, point)
+    }
+    
+    return points, nil
+}
+
+func (db *PostgreSQLDB) GetLatestPrice(tokenPair, source string) (*PricePoint, error) {
+    query := `
+        SELECT id, token_pair, source, price, volume, timestamp, created_at
+        FROM price_points
+        WHERE token_pair = $1 AND source = $2
+        ORDER BY timestamp DESC
+        LIMIT 1
+    `
+    
+    row := db.db.QueryRow(query, tokenPair, source)
+    
+    point := &PricePoint{}
+    err := row.Scan(
+        &point.ID,
+        &point.TokenPair,
+        &point.Source,
+        &point.Price,
+        &point.Volume,
+        &point.Timestamp,
+        &point.CreatedAt,
+    )
+    
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return nil, nil // No price data found
+        }
+        return nil, err
+    }
+    
+    return point, nil
+}
+
+func (db *PostgreSQLDB) CleanupOldPricePoints(olderThan time.Time) error {
+    query := `DELETE FROM price_points WHERE timestamp < $1`
+    
+    result, err := db.db.Exec(query, olderThan)
+    if err != nil {
+        return err
+    }
+    
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return err
+    }
+    
+    if rowsAffected > 0 {
+        // Log cleanup activity
+        fmt.Printf("Cleaned up %d old price points\n", rowsAffected)
+    }
+    
+    return nil
 }
 
 // Health check

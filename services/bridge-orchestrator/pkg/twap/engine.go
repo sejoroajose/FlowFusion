@@ -216,44 +216,38 @@ func (e *Engine) metricsUpdater(ctx context.Context) {
 
 // updatePriceFeeds fetches latest price data from all sources
 func (e *Engine) updatePriceFeeds() error {
-	// TODO: Implement price feed updates from various sources
-	// - Chainlink price feeds
-	// - Pyth Network
-	// - CoinGecko API
-	// - DEX price data
-	
-	e.logger.Debug("Updating price feeds")
-	
-	// Mock implementation for now
-	tokenPairs := []string{"ETH_USDC", "ATOM_USDC", "XLM_USDC"}
-	
-	for _, pair := range tokenPairs {
-		// Simulate price data
-		pricePoint := &PricePoint{
-			Timestamp: time.Now(),
-			Price:     decimal.NewFromFloat(2000 + float64(time.Now().Unix()%100)),
-			Volume:    decimal.NewFromFloat(1000000),
-			Source:    "coingecko",
-		}
-		
-		e.addPricePoint(pair, pricePoint)
-		
-		// Save to database
-		dbPricePoint := &database.PricePoint{
-			TokenPair: pair,
-			Timestamp: pricePoint.Timestamp,
-			Price:     pricePoint.Price,
-			Volume:    &pricePoint.Volume,
-			Source:    pricePoint.Source,
-			ChainID:   "ethereum", // Default for now
-		}
-		
-		if err := e.db.CreatePricePoint(dbPricePoint); err != nil {
-			e.logger.Error("Failed to save price point", zap.Error(err))
-		}
-	}
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
 
-	return nil
+    tokenPairs := []string{"ETH_USDC", "ATOM_USDC", "XLM_USDC"}
+    
+    for _, pair := range tokenPairs {
+        // Chainlink Price Feed
+        if price, err := e.getChainlinkPrice(ctx, pair); err == nil {
+            if err := e.storePricePoint(pair, "chainlink", price); err != nil {
+                e.logger.Error("Failed to store Chainlink price", 
+                    zap.String("pair", pair), zap.Error(err))
+            }
+        }
+
+        // CoinGecko API
+        if price, err := e.getCoinGeckoPrice(ctx, pair); err == nil {
+            if err := e.storePricePoint(pair, "coingecko", price); err != nil {
+                e.logger.Error("Failed to store CoinGecko price", 
+                    zap.String("pair", pair), zap.Error(err))
+            }
+        }
+
+        // DEX aggregator prices (1inch, etc.)
+        if price, err := e.getDEXPrice(ctx, pair); err == nil {
+            if err := e.storePricePoint(pair, "dex", price); err != nil {
+                e.logger.Error("Failed to store DEX price", 
+                    zap.String("pair", pair), zap.Error(err))
+            }
+        }
+    }
+
+    return nil
 }
 
 // processExecutableOrders finds orders ready for execution
@@ -278,20 +272,16 @@ func (e *Engine) processExecutableOrders() error {
 
 // processOrder determines if an order is ready for execution and queues it
 func (e *Engine) processOrder(order *database.Order) error {
-	// Check if order can execute interval
 	if !order.CanExecuteInterval() {
 		return nil
 	}
 
-	// Get execution history
 	history, err := e.db.GetExecutionHistory(order.ID)
 	if err != nil {
 		return fmt.Errorf("failed to get execution history: %w", err)
 	}
 
-	// Check if all intervals are complete
 	if len(history) >= order.ExecutionIntervals {
-		// Mark order as completed
 		order.Status = string(database.OrderStatusCompleted)
 		return e.db.UpdateOrder(order)
 	}
