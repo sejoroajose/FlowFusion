@@ -1,0 +1,151 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: flowfusion-postgres
+    environment:
+      POSTGRES_DB: flowfusion_dev
+      POSTGRES_USER: flowfusion
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - flowfusion-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowfusion -d flowfusion_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: flowfusion-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - flowfusion-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Ethereum Contracts (Hardhat node)
+  ethereum-contracts:
+    build:
+      context: .  # Build from root directory for workspace support
+      dockerfile: ./packages/ethereum-contracts/Dockerfile
+    container_name: flowfusion-ethereum
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - HARDHAT_NETWORK=localhost
+    volumes:
+      - ./deployments:/app/deployments
+      - contract_artifacts:/app/artifacts
+    ports:
+      - "8545:8545"
+    networks:
+      - flowfusion-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+  # Bridge Orchestrator Service
+  bridge-orchestrator:
+    build:
+      context: ./services/bridge-orchestrator
+      dockerfile: Dockerfile
+    container_name: flowfusion-bridge
+    environment:
+      # Server Config
+      - NODE_ENV=${NODE_ENV:-development}
+      - BRIDGE_SERVICE_PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      
+      # Database
+      - DATABASE_URL=postgres://flowfusion:${POSTGRES_PASSWORD:-password}@postgres:5432/flowfusion_dev
+      - REDIS_URL=redis://redis:6379
+      
+      # Ethereum Config
+      - ETHEREUM_NETWORK=${ETHEREUM_NETWORK:-localhost}
+      - ETHEREUM_RPC_URL=http://ethereum-contracts:8545
+      - ETHEREUM_PRIVATE_KEY=${ETHEREUM_PRIVATE_KEY}
+      - ETHEREUM_BRIDGE_ADDRESS=${ETHEREUM_BRIDGE_ADDRESS}
+      - ETHEREUM_CHAIN_ID=${ETHEREUM_CHAIN_ID:-1337}
+      
+      # Cosmos Config
+      - COSMOS_CHAIN_ID=${COSMOS_CHAIN_ID:-theta-testnet-001}
+      - COSMOS_RPC_URL=${COSMOS_RPC_URL}
+      - COSMOS_REST_URL=${COSMOS_REST_URL}
+      - COSMOS_MNEMONIC=${COSMOS_MNEMONIC}
+      
+      # Stellar Config
+      - STELLAR_NETWORK=${STELLAR_NETWORK:-testnet}
+      - STELLAR_HORIZON_URL=${STELLAR_HORIZON_URL:-https://horizon-testnet.stellar.org}
+      - STELLAR_SECRET_KEY=${STELLAR_SECRET_KEY}
+      
+      # API Keys
+      - INFURA_API_KEY=${INFURA_API_KEY}
+      - ALCHEMY_API_KEY=${ALCHEMY_API_KEY}
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY}
+      - ONE_INCH_API_KEY=${ONE_INCH_API_KEY}
+      
+      # TWAP Config
+      - TWAP_UPDATE_INTERVAL=${TWAP_UPDATE_INTERVAL:-30s}
+      - TWAP_WINDOW_MIN=${TWAP_WINDOW_MIN:-5}
+      - TWAP_MAX_SLIPPAGE=${TWAP_MAX_SLIPPAGE:-500}
+      
+      # Supported Chains
+      - SUPPORTED_CHAINS=${SUPPORTED_CHAINS:-ethereum,cosmos,stellar}
+      
+      # Security
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - flowfusion-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ethereum-contracts:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  contract_artifacts:
+    driver: local
+
+networks:
+  flowfusion-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

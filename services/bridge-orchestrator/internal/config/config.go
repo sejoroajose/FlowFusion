@@ -117,7 +117,7 @@ func Load() (*Config, error) {
 	// Load chain configurations
 	cfg.EthereumConfig = EthereumConfig{
 		Network:       getEnv("ETHEREUM_NETWORK", "sepolia"),
-		RPCURL:        getEnv("ETHEREUM_RPC_URL", ""),
+		RPCURL:        getEnv("ETHEREUM_RPC_URL", "https://eth-sepolia.g.alchemy.com/public"),
 		PrivateKey:    getEnv("ETHEREUM_PRIVATE_KEY", ""),
 		BridgeAddress: getEnv("ETHEREUM_BRIDGE_ADDRESS", ""),
 		ChainID:       getEnvAsInt64("ETHEREUM_CHAIN_ID", 11155111), // Sepolia
